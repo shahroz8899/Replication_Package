@@ -5,7 +5,7 @@ This repository is a **replication package** for experiments comparing **differe
 
 > **Scope of this README**  
 > This file explains what the repository is about, how it’s organized, and how to get started.  
-> **It does not describe what each project does.** Those details will/may be documented in each folder’s own README.
+> **It does not describe what each project does.** Those details are documented in each folder’s own README.
 
 ---
 
