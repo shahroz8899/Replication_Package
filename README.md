@@ -111,9 +111,6 @@ Each folder —
 ---
 
 
-
----
-
 ## Maintainer
 
 **Shahroz Abbas**  
