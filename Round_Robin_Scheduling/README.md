@@ -31,8 +31,7 @@ The project can build multi‑arch images, apply RBAC/manifests, create the Jobs
 - [Run as a Cluster Deployment (optional)](#run-as-a-cluster-deployment-optional)
 - [Local Demo (no Kubernetes)](#local-demo-no-kubernetes)
 - [Troubleshooting](#troubleshooting)
-- [FAQ](#faq)
-- [License](#license)
+
 
 ---
 
@@ -64,7 +63,7 @@ The project can build multi‑arch images, apply RBAC/manifests, create the Jobs
 └── (other helper scripts)
 ```
 
-> Note: We build **10 images** from the same Dockerfile by swapping the `APP` build‑arg to select `Images_From_Pi1_*.py`.
+> Note: **10 images** build  from the same Dockerfile by swapping the `APP` build‑arg to select `Images_From_Pi1_*.py`.
 
 ---
 
@@ -81,9 +80,12 @@ The project can build multi‑arch images, apply RBAC/manifests, create the Jobs
 
 ## Quick Start (TL;DR)
 
-1. **Clone** the repo and enter it.
+1. ```bash
+git clone https://github.com/shahroz8899/Replication_Package.git
+cd Replication_Package/Round_Robin_Scheduling
+```
 
-2. *(Optional)* Create a virtual env and install Python deps:
+2.  Create a virtual env and install Python deps:
 
    ```bash
    python3 -m venv venv && source venv/bin/activate
@@ -131,10 +133,10 @@ pip install -r requirements.txt
 In `build.py`, images default to tags like:
 
 ```
-shahroz90/posture-analyzer-pi1:latest
-shahroz90/posture-analyzer-pi1-1:latest
+#####/posture-analyzer-pi1:latest
+#####/posture-analyzer-pi1-1:latest
 ...
-shahroz90/posture-analyzer-pi1-9:latest
+#####/posture-analyzer-pi1-9:latest
 ```
 
 Change these to your own registry if needed.
@@ -213,7 +215,7 @@ python3 rr-scheduler.py
 
 - The scheduler loops, picking up new Pending pods and continuing the round‑robin cycle so distribution stays even as Jobs complete or restart.
 
-> Why Binding API? It schedules existing Pending pods **without** deleting them, keeping Job ownership intact and avoiding “pod storms”.
+
 
 ---
 
@@ -333,21 +335,9 @@ You’ll see an **annotated image** plus a **CSV summary** in the working direct
 
 ---
 
-## FAQ
 
 
-
-**Q: Can I change the number of Jobs/Pods?** A: Yes. Edit `posture-jobs.yaml` (add/remove Jobs). You can also consolidate into one Job and adjust `parallelism` if desired.
-
-**Q: Where do results go?** A: Each analyzer writes annotated images and a CSV (e.g., `pi1_results.csv`, `pi1_5_results.csv`). `stop.py` collects them from pods.
-
----
-
-##
-
----
-
-### One‑Minute Recap
+###  Recap
 
 - `python3 build.py` builds images, deploys `rr-scheduler`, and creates Jobs.
 - Pods get placed **round‑robin** across nodes.
