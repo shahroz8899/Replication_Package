@@ -15,15 +15,13 @@ This document is a **full, start‑to‑finish guide** for non‑experts. It cov
 4. [Step 0 — Get the Code](#step-0--get-the-code)
 5. [Step 1 — Create (or Use) a K3s/Kubernetes Cluster](#step-1--create-or-use-a-k3skubernetes-cluster)
 6. [Step 2 — Install Prometheus + Node Exporter (Helm)](#step-2--install-prometheus--node-exporter-helm)
-7. [Step 3 — Verify CPU Metrics and Create a 10s Scrape](#step-3--verify-cpu-metrics-and-create-a-10s-scrape)
-8. [Step 4 — Label Your Nodes for Affinity](#step-4--label-your-nodes-for-affinity)
-9. [Step 5 — Python Environment](#step-5--python-environment)
-10. [Step 6 — Build Images, Apply RBAC/Jobs, Run Scheduler](#step-6--build-images-apply-rbacjobs-run-scheduler)
-11. [Step 7 — Observe Scheduling and Outputs](#step-7--observe-scheduling-and-outputs)
-12. [Configuration Notes](#configuration-notes)
-13. [Troubleshooting](#troubleshooting)
-14. [Safety & Privacy](#safety--privacy)
-15. [License](#license)
+7. [Step 3 — Verify CPU Metrics and Create a 10s Scrape](#step-3--verify-cpu-metrics-and-create-a-10s-scrape) 
+8. [Step 5 — Python Environment](#step-5--python-environment)
+9. [Step 6 — Build Images, Apply RBAC/Jobs, Run Scheduler](#step-6--build-images-apply-rbacjobs-run-scheduler)
+10. [Step 7 — Observe Scheduling and Outputs](#step-7--observe-scheduling-and-outputs)
+11. [Configuration Notes](#configuration-notes)
+12. [Troubleshooting](#troubleshooting)
+
 
 ---
 
@@ -150,43 +148,6 @@ In the **Graph** tab, run a CPU utilization expression based on **node_exporter*
 
 ---
 
-## Step 4 — Label Your Nodes for Affinity
-
-The Jobs in `posture-jobs.yaml` use **node affinity**. Decide how you want Pods constrained — e.g., to specific device families or roles. Examples:
-
-```bash
-# Label Jetson Orin nodes:
-kubectl label nodes orin-desktop device=jetson-orin
-kubectl label nodes orin1-desktop device=jetson-orin1
-kubectl label nodes orin2-desktop device=jetson-orin2
-
-# Label AGX or Nano nodes:
-kubectl label nodes agx-desktop device=jetson-agx
-kubectl label nodes nano1-desktop device=jetson-nano1
-kubectl label nodes nano2-desktop device=jetson-nano2
-
-# Optional: mark general worker role
-kubectl label nodes <any-node> role=worker
-```
-
-Then ensure the **node affinity** in `posture-jobs.yaml` matches your labels. A typical block looks like:
-
-```yaml
-affinity:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: device
-              operator: In
-              values: ["jetson-orin","jetson-orin1","jetson-orin2","jetson-agx","jetson-nano1", "jetson-nano2"]
-```
-
-> If your cluster uses different labels, **edit** the YAML accordingly. You can always inspect node labels: `kubectl get nodes --show-labels`.
-
-Official docs on labeling for reference: `kubectl label` supports add/overwrite/remove.  
-
----
 
 ## Step 5 — Python Environment
 
