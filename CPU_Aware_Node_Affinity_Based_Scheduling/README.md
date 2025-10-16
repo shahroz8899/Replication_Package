@@ -1,276 +1,288 @@
-# CPU-Aware K3s Scheduler with Node Affinity (Posture Jobs)
+# CPU‑Aware K3s Scheduler with Node Affinity (Posture Jobs)
 
-This project runs 10 independent **posture analysis Jobs** (Dockerized Python apps) on a **K3s/Kubernetes** cluster and schedules their Pods based on **live CPU usage** from Prometheus.
+> **Goal:** Run 10 independent posture‑analysis **Jobs** (Dockerized Python apps) on a **K3s/Kubernetes** cluster and place their Pods on the **least‑busy nodes** based on **live CPU usage** scraped from **Prometheus** — while respecting **node affinity** via labels.  
+> **How it works (high‑level):** a lightweight custom scheduler (`cpu_scheduler.py`) polls Prometheus every few seconds, finds **under‑loaded** nodes (e.g., <90% CPU), and **binds** pending Pods to them. Periodically it **offloads** Pods from overloaded nodes so the Job controller recreates them on less busy nodes.
 
-It includes a lightweight **custom scheduler** (`cpu_scheduler.py`) that:
-- Scrapes node CPU every 10s via Prometheus.
-- Schedules pending Pods to **underloaded** nodes (< **90%** CPU).
-- Spreads Pods **evenly** across available nodes.
-- Every **30s**, offloads (deletes) Pods from **overloaded** nodes (≥ 90%) so the Job controller recreates them; the scheduler then places them on the least-loaded nodes.
-
-The project can build multi-arch images, apply RBAC, create the Jobs, and start the scheduler with a single command (`python3 build.py`).
+This document is a **full, start‑to‑finish guide** for non‑experts. It covers cluster setup, Prometheus + Node Exporter, node labels/affinity, building images, creating Jobs, and running the custom scheduler. It uses **placeholders** for any credentials — **do not** paste secrets into files.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture](#architecture)
-2. [Repo Layout](#repo-layout)
+1. [What You’ll Set Up](#what-youll-set-up)
+2. [Repository Layout](#repository-layout)
 3. [Prerequisites](#prerequisites)
-4. [Quick Start (TL;DR)](#quick-start-tldr)
-5. [Detailed Setup](#detailed-setup)
-6. [Configuration](#configuration)
-7. [How the Scheduler Works](#how-the-scheduler-works)
-8. [Run as a Cluster Deployment (optional)](#run-as-a-cluster-deployment-optional)
-9. [Troubleshooting](#troubleshooting)
-10. [FAQ](#faq)
-11. [License](#license)
+4. [Step 0 — Get the Code](#step-0--get-the-code)
+5. [Step 1 — Create (or Use) a K3s/Kubernetes Cluster](#step-1--create-or-use-a-k3skubernetes-cluster)
+6. [Step 2 — Install Prometheus + Node Exporter (Helm)](#step-2--install-prometheus--node-exporter-helm)
+7. [Step 3 — Verify CPU Metrics and Create a 10s Scrape](#step-3--verify-cpu-metrics-and-create-a-10s-scrape)
+8. [Step 4 — Label Your Nodes for Affinity](#step-4--label-your-nodes-for-affinity)
+9. [Step 5 — Python Environment](#step-5--python-environment)
+10. [Step 6 — Build Images, Apply RBAC/Jobs, Run Scheduler](#step-6--build-images-apply-rbacjobs-run-scheduler)
+11. [Step 7 — Observe Scheduling and Outputs](#step-7--observe-scheduling-and-outputs)
+12. [Configuration Notes](#configuration-notes)
+13. [Troubleshooting](#troubleshooting)
+14. [Safety & Privacy](#safety--privacy)
+15. [License](#license)
 
 ---
 
-## Architecture
+## What You’ll Set Up
 
-- **K3s / Kubernetes** cluster with several worker nodes (e.g., `agx-desktop`, `orin-desktop`, `nano1-desktop`, `nano2-desktop`, `orin1-desktop`, `orin2-desktop`).
-- **Prometheus** scraping **node exporter** on each node (we use 10s CPU average).
-- **Jobs**: `posture-pi1`, `posture-pi1-1`, …, `posture-pi1-9`, each producing 1 Pod (Python apps like `Images_From_Pi1.py`, `Images_From_Pi1_1.py`, …).
-- **Custom scheduler** (`cpu_scheduler.py`) with `schedulerName: cpu-scheduler` to:
-  - Bind **Pending** Pods to chosen nodes (Kubernetes **Binding** API).
-  - Offload Pods from overloaded nodes so they get rescheduled.
+- **K3s/Kubernetes** cluster with several worker nodes (e.g., `agx-desktop`, `orin-desktop`, `nano1-desktop`, `nano2-desktop`, `orin1-desktop`, `orin2-desktop`).
+- **Prometheus** scraping each node via **Node Exporter** (CPU scraped every **10s**).
+- **Jobs**: `posture-pi1`, `posture-pi1-1`, …, `posture-pi1-9` (1 Pod each).
+- **Custom scheduler**: `cpu_scheduler.py` (uses `schedulerName: cpu-scheduler`) binds **Pending** Pods and periodically **offloads** from overloaded nodes (≥90%).
+
+> The project includes a helper `build.py` that can build multi‑arch images, push to a registry, apply RBAC, create the Jobs, and start the scheduler with one command.
 
 ---
 
-## Repo Layout
+## Repository Layout
 
 ```
-.
+CPU_Aware_Node_Affinity_Based_Scheduling/
 ├── build.py                        # One-shot build/deploy/run helper
-├── cpu_scheduler.py                # Custom CPU-aware scheduler (Binding API)
-├── cpu_metrics.py                  # Prometheus queries & node mapping helpers
-├── posture-jobs.yaml               # 10 Jobs (one Pod each) using schedulerName: cpu-scheduler
-├── cpu-scheduler-rbac.yaml         # RBAC for scheduler (SA + ClusterRole + Binding)
-├── Dockerfile                      # Single Dockerfile used for posture analyzers
-├── requirements.txt                # Python deps for posture apps + scheduler
-├── Images_From_Pi1.py              # Analyzer app (and Images_From_Pi1_1.py ... _9.py)
-├── docker-compose.yml              # optional local use (not required for k8s)
-└── (other helper scripts)
+├── cpu_scheduler.py                # Custom CPU-aware binder/offloader (Binding API)
+├── cpu_metrics.py                  # Prometheus query & node mapping helpers
+├── posture-jobs.yaml               # 10 Jobs (1 Pod each) with schedulerName: cpu-scheduler
+├── cpu-scheduler-rbac.yaml         # ServiceAccount + ClusterRole(+Binding) for scheduler
+├── Dockerfile                      # Dockerfile for posture analyzers
+├── requirements.txt                # Python dependencies for apps + scheduler
+├── Images_From_Pi1.py              # Analyzer app (also Images_From_Pi1_1.py ... _9.py)
+└── docker-compose.yml              # optional local testing (not required on k8s)
 ```
 
-> **Note**: We build 10 images from the same Dockerfile by swapping the `APP` build-arg.
+> The **RaspberryPi_Script/** (at repo root) captures/sends images; projects can consume them.
 
 ---
 
 ## Prerequisites
 
-- A running **K3s** or **Kubernetes** cluster (you have `kubectl` access).
-- **Prometheus** scraping Node Exporter on each node (standard setup).
-- Docker with **Buildx** (for multi-arch builds).
-- Python 3.10+ on your operator machine (to run `build.py`).
-- A container registry you can push to (Docker Hub, GHCR, etc.) — update image names if you use a different registry.
+- A **K3s** or **Kubernetes** cluster (control plane + worker nodes).
+- **kubectl** installed and pointing to the cluster.
+- **Helm 3** installed.
+- **Docker** with **Buildx** (for multi‑arch builds) on the machine running `build.py`.
+- A container registry account (e.g., Docker Hub). Use **placeholders** — no secrets in the repo:
+  - `DOCKER_REGISTRY=registry.hub.docker.com`
+  - `DOCKER_NAMESPACE=<your-dockerhub-username>`
+- Python **3.10+**.
 
 ---
 
-## Quick Start (TL;DR)
+## Step 0 — Get the Code
 
-1. Clone the repo and enter it.
-2. (Optional) Create a virtual env and install Python deps:
-   ```bash
-   python3 -m venv venv && source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-3. Make sure `kubectl` points to the right cluster:
-   ```bash
-   kubectl get nodes
-   ```
-4. Run the all-in-one builder/launcher:
-   ```bash
-   python3 build.py
-   ```
-   What this does:
-   - Builds and pushes 10 posture analyzer images (multi-arch).
-   - Applies scheduler **RBAC** (`cpu-scheduler-rbac.yaml`).
-   - Applies **Jobs** (`posture-jobs.yaml`).
-   - Starts the **custom scheduler** (`python3 cpu_scheduler.py`) which binds Pending Pods.
-
-5. Watch Pods schedule and start:
-   ```bash
-   kubectl get pods -l app=posture -o wide
-   ```
-
----
-
-## Detailed Setup
-
-### 1) Install requirements (local)
 ```bash
-python3 -m venv venv && source venv/bin/activate
+git clone https://github.com/shahroz8899/Replication_Package.git
+cd Replication_Package/CPU_Aware_Node_Affinity_Based_Scheduling
+```
+
+---
+
+## Step 1 — Create (or Use) a K3s/Kubernetes Cluster
+
+If you don’t already have one, **either** create a small lab cluster (on Jetsons/PCs/VMs) or reuse a cloud cluster. For K3s on a Linux host (quick start):
+
+```bash
+# On the host that will be the server:
+curl -sfL https://get.k3s.io | sh -
+# On agents, point to the server (set token/server from your environment securely)
+curl -sfL https://get.k3s.io | K3S_URL=https://<server-ip>:6443 K3S_TOKEN=<redacted> sh -
+
+# Confirm nodes:
+kubectl get nodes -o wide
+```
+
+> **Tip:** Make sure every node shows **Ready** and has working DNS/networking before continuing.
+
+---
+
+## Step 2 — Install Prometheus + Node Exporter (Helm)
+
+Easiest path is the **kube‑prometheus‑stack** Helm chart (includes Prometheus Operator, Prometheus, Alertmanager, Grafana, and **Node Exporter DaemonSet**).
+
+```bash
+kubectl create namespace monitoring
+
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+# Create a minimal values.yaml overriding the scrape interval to 10s:
+cat > values.yaml <<'YAML'
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 10s
+    evaluationInterval: 10s
+YAML
+
+helm install kube-prom-stack prometheus-community/kube-prometheus-stack \
+  -n monitoring -f values.yaml
+```
+
+> This deploys **node-exporter** to all nodes automatically.   
+
+Once up, check that Pods are **Running**:
+
+```bash
+kubectl get pods -n monitoring -o wide
+```
+
+---
+
+## Step 3 — Verify CPU Metrics and Create a 10s Scrape
+
+Open the Prometheus UI (port-forward from your workstation):
+
+```bash
+kubectl -n monitoring port-forward svc/kube-prom-stack-prometheus 9090:9090
+```
+
+In the **Graph** tab, run a CPU utilization expression based on **node_exporter** metrics:
+
+```
+100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)
+```
+
+- Values near **0** mean idle; values near **100** mean fully used.
+- The scheduler queries Prometheus over HTTP; keep the service reachable from the machine running `cpu_scheduler.py` (port-forward or cluster DNS if running in‑cluster).
+
+> If you prefer a dedicated job with an explicit 10s scrape, you can create a `ServiceMonitor` or `ScrapeConfig` (Prometheus Operator) targeting `node-exporter` with `scrapeInterval: 10s`.
+
+---
+
+## Step 4 — Label Your Nodes for Affinity
+
+The Jobs in `posture-jobs.yaml` use **node affinity**. Decide how you want Pods constrained — e.g., to specific device families or roles. Examples:
+
+```bash
+# Label Jetson Orin nodes:
+kubectl label nodes orin-desktop device=jetson-orin
+kubectl label nodes orin1-desktop device=jetson-orin1
+kubectl label nodes orin2-desktop device=jetson-orin2
+
+# Label AGX or Nano nodes:
+kubectl label nodes agx-desktop device=jetson-agx
+kubectl label nodes nano1-desktop device=jetson-nano1
+kubectl label nodes nano2-desktop device=jetson-nano2
+
+# Optional: mark general worker role
+kubectl label nodes <any-node> role=worker
+```
+
+Then ensure the **node affinity** in `posture-jobs.yaml` matches your labels. A typical block looks like:
+
+```yaml
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: device
+              operator: In
+              values: ["jetson-orin","jetson-orin1","jetson-orin2","jetson-agx","jetson-nano1", "jetson-nano2"]
+```
+
+> If your cluster uses different labels, **edit** the YAML accordingly. You can always inspect node labels: `kubectl get nodes --show-labels`.
+
+Official docs on labeling for reference: `kubectl label` supports add/overwrite/remove.  
+
+---
+
+## Step 5 — Python Environment
+
+On the **operator** machine that will run `build.py` (and possibly `cpu_scheduler.py`):
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 2) Configure your image registry (optional)
-In `build.py`, images default to Docker Hub tags like:
-```
-shahroz90/posture-analyzer-images_from_pi1:latest
-...
-shahroz90/posture-analyzer-images_from_pi1_9:latest
-```
-Change these to your own registry/repo if needed.
-
-### 3) Apply RBAC for the custom scheduler
-`build.py` already does this, but you can do it manually:
-```bash
-kubectl apply -f cpu-scheduler-rbac.yaml
-```
-
-### 4) Deploy the Jobs
-`build.py` also does this; manual command:
-```bash
-kubectl apply -f posture-jobs.yaml
-```
-
-### 5) Run the scheduler (from your laptop or server)
-`build.py` runs it for you. To run manually:
-```bash
-python3 cpu_scheduler.py
-```
-- If you run **outside** the cluster, it uses your local `~/.kube/config`.
-- If you run **inside** the cluster (as a Pod), it uses in-cluster auth.
+> This installs both posture app and scheduler dependencies.
 
 ---
 
-## Configuration
+## Step 6 — Build Images, Apply RBAC/Jobs, Run Scheduler
 
-The scheduler reads a few env vars (all have sane defaults):
+Set **safe environment variables** (no secrets checked into git). Example for Docker Hub:
 
-| Variable                       | Default            | Description |
-|-------------------------------|--------------------|-------------|
-| `POD_NAMESPACE`               | `default`          | Namespace where Jobs run. |
-| `POD_LABEL_SELECTOR`          | `app=posture`      | Label selector for posture pods. |
-| `SCHEDULER_NAME`              | `cpu-scheduler`    | Must match `spec.schedulerName` in `posture-jobs.yaml`. |
-| `SCHEDULING_INTERVAL_SECONDS` | `30`               | Loop period to re-check CPU & offload. |
-| `CPU_THRESHOLD`               | `90`               | Overload threshold (% used). |
-| `MIN_POD_AGE_SECONDS`         | `5`                | Avoid racing brand-new Pending pods. |
-
-To change them when running locally:
 ```bash
-export CPU_THRESHOLD=85
-python3 cpu_scheduler.py
+export DOCKER_NAMESPACE=<your-dockerhub-username>
+export IMAGE_TAG=latest
 ```
+
+Now run the all‑in‑one helper:
+
+```bash
+python3 build.py
+```
+
+What `build.py` typically does:
+
+- Builds and **pushes** 10 images (multi‑arch with Buildx) for the analyzer apps.
+- Applies **RBAC** (`cpu-scheduler-rbac.yaml`) so the scheduler can read Pods/nodes and create **Binding** objects.
+- Applies **Jobs** (`posture-jobs.yaml`) which specify `schedulerName: cpu-scheduler`.
+- Starts the **custom scheduler**: `python3 cpu_scheduler.py` (can also be run in‑cluster as a Deployment if desired).
+
+> If you prefer manual control, you can split the steps: `kubectl apply -f cpu-scheduler-rbac.yaml`, `kubectl apply -f posture-jobs.yaml`, then run the scheduler separately.
 
 ---
 
-## How the Scheduler Works
+## Step 7 — Observe Scheduling and Outputs
 
-### At First Run (Initial Scheduling)
-1. Scrape Prometheus for **10-second average CPU** on all worker nodes.
-2. Identify **underloaded** nodes (< 90% CPU by default).
-3. Enumerate **Pending** posture Pods with `schedulerName: cpu-scheduler`.
-4. Spread them **evenly** across underloaded nodes.
-5. For each:
-   - (Optional) **label** the pod with `cpu-scheduler/target-node=<node>`.
-   - **Bind** the pod to the node using the **Pod Binding** API (no delete/recreate).
+Watch Pods being scheduled and started:
 
-### Every 30 Seconds (Loop)
-1. Re-scrape CPU usage.
-2. If any node is **overloaded** (≥ 90%):
-   - Find **Running** posture Pods on that node and **delete** them (fast).
-   - The Job controller will create **new Pending** Pods.
-3. **Schedule** any Pending Pods again to the **least-loaded** under-threshold nodes (balanced).
+```bash
+kubectl get pods -l app=posture -o wide -w
+```
 
-### Completion
-- When no **Pending** and **Running** posture Pods remain, the scheduler **exits**.
+- Pending Pods should be **bound** to the **least busy** nodes.
+- Every ~30s, if a node is ≥90% CPU, the scheduler may **delete** a Pod there; the Job controller will recreate it, and the scheduler will bind it to a less loaded node.
 
-> We **don’t** mutate `spec.affinity` on existing pods (immutable). We record our decision via a **label** and rely on **Binding** for placement.
+When a Pod completes, it writes a **CSV** result on the node where it ran (exact path is defined in the app). Collect or ship these as needed.
 
 ---
 
-## Run as a Cluster Deployment (optional)
+## Configuration Notes
 
-Instead of running `cpu_scheduler.py` from your shell, you can deploy it as a single-replica controller:
-
-```yaml
-# cpu-scheduler-deploy.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: cpu-scheduler
-  namespace: kube-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels: { app: cpu-scheduler }
-  template:
-    metadata:
-      labels: { app: cpu-scheduler }
-    spec:
-      serviceAccountName: cpu-scheduler
-      containers:
-      - name: scheduler
-        image: YOUR_REGISTRY/cpu-scheduler:latest
-        imagePullPolicy: IfNotPresent
-        command: ["python3", "/app/cpu_scheduler.py"]
-        env:
-        - name: POD_NAMESPACE
-          value: "default"
-        - name: SCHEDULER_NAME
-          value: "cpu-scheduler"
-        - name: CPU_THRESHOLD
-          value: "90"
-        - name: SCHEDULING_INTERVAL_SECONDS
-          value: "30"
-```
-
-Build and push an image that contains `cpu_scheduler.py` and `cpu_metrics.py`, then:
-```bash
-kubectl apply -f cpu-scheduler-rbac.yaml
-kubectl apply -f cpu-scheduler-deploy.yaml
-```
+- **Thresholds:** Edit the CPU threshold (e.g., 90%) and polling intervals (e.g., 10s/30s) in `cpu_scheduler.py` / `cpu_metrics.py` if needed.
+- **Prometheus URL:** The scheduler needs a Prometheus HTTP endpoint. If running outside the cluster, use `kubectl port-forward` (Step 3) or expose Prometheus via a LoadBalancer/Ingress.
+- **Node Mapping:** `cpu_metrics.py` associates Prometheus `instance` values to Kubernetes node names. Confirm your mapping aligns (e.g., by hostname or IP).
+- **Node Affinity:** Ensure `posture-jobs.yaml` `affinity.nodeAffinity` matches your node labels (Step 4).
 
 ---
 
 ## Troubleshooting
 
-**Pods stay Pending**
-- Ensure Jobs use `spec.template.spec.schedulerName: cpu-scheduler`.
-- Make sure the scheduler is **running** (locally or as a Deployment).
-- Check RBAC is applied (`cpu-scheduler-rbac.yaml`).
-- Look at pod events:
-  ```bash
-  kubectl describe pod <name> | sed -n '/Events:/,$p'
-  ```
+**Prometheus / metrics**  
+- `kubectl -n monitoring get pods` shows all **Running**.  
+- Port‑forward Prometheus and run the CPU query. If no data, check that the **node‑exporter** DaemonSet is present and **Targets** are **UP** in Prometheus.  
+- If CPU values look wrong, try a window like `[2m]` or `[5m]` in the `irate()` to smooth spiky nodes.
 
-**“Forbidden: pod updates may not change fields … Affinity”**
-- Expected. Don’t patch `spec.affinity` after creation. This project **binds** pods and optionally **labels** them.
+**Scheduler permissions**  
+- If the scheduler can’t bind, check RBAC: `kubectl auth can-i create binding --as=system:serviceaccount:<ns>:<sa>`.  
+- Ensure the ServiceAccount/ClusterRole/Binding names in `cpu-scheduler-rbac.yaml` match what the scheduler code expects.
 
-**Binding errors / status 409**
-- 409 = already bound (race) → harmless. The scheduler logs “Bind skipped …”.
+**Node affinity / labels**  
+- If Pods remain Pending with messages about **node affinity**, re‑check labels:  
+  `kubectl get nodes --show-labels | grep device=`  
+- Update `posture-jobs.yaml` accordingly, then `kubectl apply -f posture-jobs.yaml`.
 
-**Prometheus mapping seems off**
-- Confirm that your `cpu_metrics.py` maps exporter IPs to node names correctly for your cluster (K3s Node Exporter pods often expose `podIP:9100` → map `podIP` → `spec.nodeName`).
+**Images / registry**  
+- Authenticate to your registry **outside** the repo (no secrets committed):  
+  `docker login`  
+- If multi‑arch fails, ensure Buildx is set up:  
+  `docker buildx create --use`
 
-**Large Docker build context**
-- Add a `.dockerignore` to speed up builds:
-  ```
-  .git
-  venv/
-  __pycache__/
-  *.pyc
-  *.log
-  *.csv
-  analyzed_images/
-  ```
+**Kubeconfig / context**  
+- Confirm `kubectl` points to the right cluster: `kubectl config current-context` and `kubectl get nodes`.
 
----
+**Outputs (CSV)**  
+- If CSVs don’t appear, check Pod logs: `kubectl logs <pod>`. Verify mount paths/permissions if writing to hostPaths/PVCs.
 
-## FAQ
 
-**Q: Why not use the default Kubernetes scheduler?**  
-A: We need **CPU-aware placement** and automatic **offloading** when nodes exceed a threshold. Our controller does a targeted strategy that the default scheduler doesn’t enforce out of the box.
 
-**Q: Why Binding API instead of delete/recreate?**  
-A: Binding directly schedules the **existing Pending pod**. It avoids “pod storms”, keeps Job ownership intact, and leads to clean Job completion semantics.
-
-**Q: Can I change the number of Jobs/Pods?**  
-A: Yes. Edit `posture-jobs.yaml` (add/remove Jobs) or change `parallelism/completions` if you convert to a single Job with multiple Pods.
 
 ---
 
