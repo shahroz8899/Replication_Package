@@ -63,7 +63,7 @@ This layout helps to:
 
 The **`RaspberryPi_Script/`** provides a single script (plus any helpers) to:
 
-- **Capture** frames from a camera or specified source.
+- **Capture** frames from a camera.
 - **Optionally preprocess** frames (e.g., resize, crop, format).
 - **Send** frames to a **receiver** (local or remote) using configurable parameters.
 
